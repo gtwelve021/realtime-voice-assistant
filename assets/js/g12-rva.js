@@ -18,9 +18,9 @@
   let dc = null;
   let stream = null;
   let audio = null;
-  let pendingCalls = new Map();
+  const handledCalls = new Set();
   const storageKey = 'g12RvaSession:v2';
-  const leadFields = ['name', 'phone', 'email', 'message'];
+  const leadFields = ['name', 'phone', 'email', 'message', 'preferred_time'];
   let session = loadSession();
 
   function loadSession() {
@@ -187,7 +187,7 @@
       audio.srcObject = null;
       audio = null;
     }
-    pendingCalls.clear();
+    handledCalls.clear();
     root.classList.remove('is-live');
     setStatus('Ready');
     startBtn.disabled = false;
@@ -232,13 +232,8 @@
       remember('assistant', data.transcript);
     }
 
-    const item = data.item || data.response || data;
-    if (item && item.type === 'function_call' && item.name) {
-      handleFunctionCall(item);
-    }
-
     if (data.type === 'response.function_call_arguments.done') {
-      const call = pendingCalls.get(data.call_id) || {
+      const call = {
         call_id: data.call_id,
         name: data.name,
         arguments: ''
@@ -259,6 +254,8 @@
     }
 
     if (!callId || !name) return;
+    if (handledCalls.has(callId)) return;
+    handledCalls.add(callId);
 
     let output;
     try {
@@ -326,6 +323,7 @@
       email: args.email || session.lead.email || '',
       message: args.message || session.lead.message || ''
     };
+    values.preferred_time = args.preferred_time || session.lead.preferred_time || '';
     rememberLead(values);
 
     const selectors = {
@@ -348,6 +346,7 @@
     if (leadForm) {
       leadForm.hidden = false;
       hydrateLeadForm();
+      showLeadStep(nextMissingLeadField() || 'confirm');
     }
 
     const missing = nextMissingLeadField();
@@ -360,15 +359,24 @@
 
   async function requestCallback(args) {
     rememberLead(args || {});
-    const missing = nextMissingLeadField(['phone']);
+    const missing = nextMissingLeadField();
     if (missing) {
       hydrateLeadForm();
+      showLeadStep(missing);
       return { ok: false, missing: missing, message: 'Ask only for the next missing field: ' + fieldLabel(missing) + '.' };
+    }
+    if (session.lead.already_sent) {
+      return { ok: true, alreadySent: true, message: 'This callback request was already sent in this browser session.' };
     }
     const payload = Object.assign({}, session.lead, args, { page: window.location.href });
     const data = await rest('/lead', payload);
-    if (leadForm) leadForm.hidden = true;
-    remember('assistant', 'Callback request sent to G12.');
+    session.lead.already_sent = true;
+    saveSession();
+    if (leadForm) {
+      leadForm.hidden = true;
+      showLeadStep('confirm');
+    }
+    remember('assistant', data.duplicate ? 'Callback request already saved with G12.' : 'Callback request sent to G12.');
     return data;
   }
 
@@ -378,6 +386,7 @@
       const field = leadForm.elements[key];
       if (field && session.lead[key]) field.value = session.lead[key];
     });
+    showLeadStep(nextMissingLeadField() || 'confirm');
   }
 
   function nextMissingLeadField(requiredOnly) {
@@ -390,9 +399,29 @@
       name: 'your name',
       phone: 'your phone number',
       email: 'your email address',
-      message: 'your business activity or question'
+      message: 'your business activity or question',
+      preferred_time: 'your preferred callback time'
     };
     return labels[key] || key;
+  }
+
+  function showLeadStep(step) {
+    if (!leadForm) return;
+    const stepEl = leadForm.querySelector('[data-g12-rva-lead-step]');
+    const submit = leadForm.querySelector('button[type="submit"]');
+    leadFields.forEach((key) => {
+      const field = leadForm.querySelector('[data-g12-rva-field="' + key + '"]');
+      if (field) field.hidden = key !== step;
+    });
+    if (step === 'confirm') {
+      if (stepEl) stepEl.textContent = 'Please confirm. Should I send this callback request to G12?';
+      if (submit) submit.textContent = 'Send request';
+    } else {
+      if (stepEl) stepEl.textContent = 'Please enter ' + fieldLabel(step) + '.';
+      if (submit) submit.textContent = 'Next';
+      const current = leadForm.querySelector('[data-g12-rva-field="' + step + '"]');
+      if (current && !leadForm.hidden) current.focus();
+    }
   }
 
   function buildSessionPrompt() {
@@ -419,8 +448,14 @@
     leadForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const fd = new FormData(leadForm);
+      rememberLead(Object.fromEntries(fd.entries()));
+      const missing = nextMissingLeadField();
+      if (missing) {
+        showLeadStep(missing);
+        setMessage('Please add ' + fieldLabel(missing) + '.');
+        return;
+      }
       try {
-        rememberLead(Object.fromEntries(fd.entries()));
         await requestCallback(Object.fromEntries(fd.entries()));
         setMessage('Thanks. Your request was sent to G12.');
       } catch (error) {

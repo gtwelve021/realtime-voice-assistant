@@ -2,7 +2,7 @@
 /**
  * Plugin Name: G12 Realtime Voice Assistant
  * Description: Bottom-center OpenAI Realtime voice concierge for G12 business setup guidance, page help, form assistance, and lead capture.
- * Version: 0.2.0
+ * Version: 0.2.1
  * Author: G12
  */
 
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class G12_Realtime_Voice_Assistant {
     const OPTION = 'g12_rva_settings';
     const REST_NAMESPACE = 'g12-rva/v1';
-    const VERSION = '0.2.0';
+    const VERSION = '0.2.1';
 
     private static $instance = null;
 
@@ -141,11 +141,13 @@ final class G12_Realtime_Voice_Assistant {
                     <div class="g12-rva__links" hidden data-g12-rva-links></div>
                     <div class="g12-rva__history" hidden data-g12-rva-history></div>
                     <form class="g12-rva__lead" hidden data-g12-rva-lead>
-                        <input type="text" name="name" placeholder="Name" autocomplete="name">
-                        <input type="tel" name="phone" placeholder="Phone" autocomplete="tel">
-                        <input type="email" name="email" placeholder="Email" autocomplete="email">
-                        <textarea name="message" rows="3" placeholder="Business activity or question"></textarea>
-                        <button type="submit">Send request</button>
+                        <p class="g12-rva__lead-step" data-g12-rva-lead-step>First, what is your name?</p>
+                        <input type="text" name="name" placeholder="Name" autocomplete="name" data-g12-rva-field="name">
+                        <input type="tel" name="phone" placeholder="Phone" autocomplete="tel" data-g12-rva-field="phone" hidden>
+                        <input type="email" name="email" placeholder="Email" autocomplete="email" data-g12-rva-field="email" hidden>
+                        <textarea name="message" rows="3" placeholder="Business activity or question" data-g12-rva-field="message" hidden></textarea>
+                        <input type="text" name="preferred_time" placeholder="Preferred callback time" data-g12-rva-field="preferred_time" hidden>
+                        <button type="submit">Next</button>
                     </form>
                 </div>
             </section>
@@ -241,7 +243,7 @@ final class G12_Realtime_Voice_Assistant {
     }
 
     private function instructions() {
-        return "You are the G12 voice concierge for a WordPress website about UAE and Dubai business setup. Speak briefly and naturally. Help users choose mainland, free zone, offshore, visa, tax, banking, and license options. If a user wants a callback or form help, ask exactly one question at a time in this order: name, phone number, email, business activity or message, preferred callback time, then confirmation. Never ask for all form fields in one message. Use any session context provided by the browser so the user does not need to repeat details after a page refresh. Use tools when helpful: site_search to find relevant website pages, open_page to open relevant same-site pages in a new tab, fill_contact_form to fill visible forms with details already collected, and request_callback only after the user clearly confirms they want contact. Never claim legal certainty. Do not edit WordPress pages for public users. For page changes, say an admin must approve changes.";
+        return "You are the G12 voice concierge for a WordPress website about UAE and Dubai business setup. Speak briefly and naturally. Help users choose mainland, free zone, offshore, visa, tax, banking, and license options. If a user wants a callback or form help, ask exactly one question at a time in this order: name, phone number, email, business activity or message, preferred callback time, then confirmation. Never ask for all form fields in one message. Use any session context provided by the browser so the user does not need to repeat details after a page refresh. Use tools when helpful: site_search to find relevant website pages, open_page to open relevant same-site pages in a new tab, fill_contact_form to fill visible forms with details already collected, and request_callback only once after the user clearly confirms they want contact. If a request_callback tool returns duplicate=true or alreadySent=true, do not call it again; tell the user the request is already saved. Never claim legal certainty. Do not edit WordPress pages for public users. For page changes, say an admin must approve changes.";
     }
 
     private function tool_schema() {
@@ -281,6 +283,7 @@ final class G12_Realtime_Voice_Assistant {
                         'phone' => array('type' => 'string'),
                         'email' => array('type' => 'string'),
                         'message' => array('type' => 'string'),
+                        'preferred_time' => array('type' => 'string'),
                     ),
                 ),
             ),
@@ -295,8 +298,9 @@ final class G12_Realtime_Voice_Assistant {
                         'phone' => array('type' => 'string'),
                         'email' => array('type' => 'string'),
                         'message' => array('type' => 'string'),
+                        'preferred_time' => array('type' => 'string'),
                     ),
-                    'required' => array('phone'),
+                    'required' => array('name', 'phone', 'email', 'message'),
                 ),
             ),
         );
@@ -371,20 +375,61 @@ final class G12_Realtime_Voice_Assistant {
         $phone = sanitize_text_field((string) $request->get_param('phone'));
         $email = sanitize_email((string) $request->get_param('email'));
         $message = sanitize_textarea_field((string) $request->get_param('message'));
+        $preferred_time = sanitize_text_field((string) $request->get_param('preferred_time'));
         $page = esc_url_raw((string) $request->get_param('page'));
 
         if ($phone === '' && $email === '') {
             return new WP_Error('g12_rva_missing_contact', 'Please provide phone or email.', array('status' => 400));
         }
 
+        $lead_hash = $this->lead_hash($name, $phone, $email, $message, $preferred_time, $page);
+        $transient_key = 'g12_rva_lead_' . $lead_hash;
+        $existing_id = (int) get_transient($transient_key);
+        if (!$existing_id) {
+            $existing = get_posts(array(
+                'post_type' => 'g12_voice_lead',
+                'post_status' => array('private', 'publish', 'draft'),
+                'posts_per_page' => 1,
+                'fields' => 'ids',
+                'meta_key' => '_g12_rva_lead_hash',
+                'meta_value' => $lead_hash,
+                'date_query' => array(
+                    array(
+                        'after' => '2 hours ago',
+                    ),
+                ),
+            ));
+            if (!empty($existing)) {
+                $existing_id = (int) $existing[0];
+            }
+        }
+
+        if ($existing_id) {
+            set_transient($transient_key, $existing_id, 2 * HOUR_IN_SECONDS);
+            return rest_ensure_response(array(
+                'ok' => true,
+                'duplicate' => true,
+                'leadId' => $existing_id,
+                'message' => 'This callback request is already saved.',
+            ));
+        }
+
         $title = $name !== '' ? $name : ($phone !== '' ? $phone : $email);
         $body = "Voice assistant lead\n\nName: {$name}\nPhone: {$phone}\nEmail: {$email}\nMessage: {$message}\nPage: {$page}\n";
+        if ($preferred_time !== '') {
+            $body .= "Preferred time: {$preferred_time}\n";
+        }
         $post_id = wp_insert_post(array(
             'post_type' => 'g12_voice_lead',
             'post_status' => 'private',
             'post_title' => 'Voice lead - ' . $title,
             'post_content' => $body,
         ), true);
+
+        if (!is_wp_error($post_id) && $post_id) {
+            update_post_meta($post_id, '_g12_rva_lead_hash', $lead_hash);
+            set_transient($transient_key, (int) $post_id, 2 * HOUR_IN_SECONDS);
+        }
 
         $settings = $this->settings();
         $to = sanitize_email($settings['lead_email']);
@@ -399,6 +444,18 @@ final class G12_Realtime_Voice_Assistant {
             'ok' => true,
             'leadId' => is_wp_error($post_id) ? 0 : (int) $post_id,
         ));
+    }
+
+    private function lead_hash($name, $phone, $email, $message, $preferred_time, $page) {
+        $parts = array(
+            strtolower(trim((string) $name)),
+            preg_replace('/\D+/', '', (string) $phone),
+            strtolower(trim((string) $email)),
+            strtolower(trim((string) $message)),
+            strtolower(trim((string) $preferred_time)),
+            strtok((string) $page, '?'),
+        );
+        return hash('sha256', implode('|', $parts));
     }
 
     public function admin_page_draft(WP_REST_Request $request) {
