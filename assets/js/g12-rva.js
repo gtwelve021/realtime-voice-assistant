@@ -18,6 +18,7 @@
   let dc = null;
   let stream = null;
   let audio = null;
+  let sessionLogged = false;
   const handledCalls = new Set();
   const storageKey = 'g12RvaSession:v2';
   const leadFields = ['name', 'phone', 'email', 'message', 'preferred_time'];
@@ -124,10 +125,6 @@
       startBtn.disabled = true;
       stopBtn.disabled = false;
 
-      const tokenData = await rest('/client-secret', {});
-      const token = tokenData.value || (tokenData.client_secret && tokenData.client_secret.value);
-      if (!token) throw new Error('No client secret returned');
-
       pc = new RTCPeerConnection();
       dc = pc.createDataChannel('oai-events');
       dc.addEventListener('message', onRealtimeEvent);
@@ -149,19 +146,23 @@
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
-        method: 'POST',
-        body: offer.sdp,
-        headers: {
-          'Authorization': 'Bearer ' + token,
-          'Content-Type': 'application/sdp'
+      let answerSdp = '';
+      if (config.connectionMode === 'server') {
+        try {
+          const connection = await rest('/connect', { sdp: offer.sdp });
+          answerSdp = connection.sdp || '';
+        } catch (serverError) {
+          setStatus('Retrying...');
+          answerSdp = await connectWithClientSecret(offer.sdp);
         }
-      });
-      if (!sdpResponse.ok) throw new Error('Realtime connection failed');
+      } else {
+        answerSdp = await connectWithClientSecret(offer.sdp);
+      }
+      if (!answerSdp) throw new Error('Realtime connection failed');
 
       await pc.setRemoteDescription({
         type: 'answer',
-        sdp: await sdpResponse.text()
+        sdp: answerSdp
       });
     } catch (error) {
       setStatus('Error');
@@ -170,7 +171,25 @@
     }
   }
 
-  function stopVoice() {
+  async function connectWithClientSecret(offerSdp) {
+    const tokenData = await rest('/client-secret', {});
+    const token = tokenData.value || (tokenData.client_secret && tokenData.client_secret.value);
+    if (!token) throw new Error('No client secret returned');
+
+    const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST',
+      body: offerSdp,
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/sdp'
+      }
+    });
+    if (!sdpResponse.ok) throw new Error('Realtime connection failed');
+    return sdpResponse.text();
+  }
+
+  async function stopVoice() {
+    await logSession();
     if (dc) {
       try { dc.close(); } catch (e) {}
       dc = null;
@@ -192,6 +211,19 @@
     setStatus('Ready');
     startBtn.disabled = false;
     stopBtn.disabled = true;
+  }
+
+  async function logSession() {
+    if (sessionLogged || !config.storeSessions) return;
+    if (!session.messages.length && !Object.keys(session.lead || {}).length) return;
+    sessionLogged = true;
+    try {
+      await rest('/session-log', {
+        messages: session.messages,
+        lead: session.lead,
+        page: window.location.href
+      });
+    } catch (e) {}
   }
 
   function sendEvent(event) {
@@ -369,9 +401,10 @@
       return { ok: true, alreadySent: true, message: 'This callback request was already sent in this browser session.' };
     }
     const payload = Object.assign({}, session.lead, args, { page: window.location.href });
-    const data = await rest('/lead', payload);
-    session.lead.already_sent = true;
-    saveSession();
+      const data = await rest('/lead', payload);
+      session.lead.already_sent = true;
+      saveSession();
+      logSession();
     if (leadForm) {
       leadForm.hidden = true;
       showLeadStep('confirm');

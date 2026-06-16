@@ -2,7 +2,7 @@
 /**
  * Plugin Name: G12 Realtime Voice Assistant
  * Description: Bottom-center OpenAI Realtime voice concierge for G12 business setup guidance, page help, form assistance, and lead capture.
- * Version: 0.2.1
+ * Version: 0.3.0
  * Author: G12
  */
 
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class G12_Realtime_Voice_Assistant {
     const OPTION = 'g12_rva_settings';
     const REST_NAMESPACE = 'g12-rva/v1';
-    const VERSION = '0.2.1';
+    const VERSION = '0.3.0';
 
     private static $instance = null;
 
@@ -48,6 +48,8 @@ final class G12_Realtime_Voice_Assistant {
             'lead_email' => get_option('admin_email'),
             'brand_label' => 'G12 Voice Guide',
             'greeting' => 'Hi, I am your G12 voice guide. I can help with Dubai business setup, find the right page, and collect callback details one question at a time.',
+            'store_sessions' => 1,
+            'connection_mode' => 'ephemeral',
         );
     }
 
@@ -87,6 +89,18 @@ final class G12_Realtime_Voice_Assistant {
             'supports' => array('title', 'editor', 'custom-fields'),
             'capability_type' => 'post',
         ));
+
+        register_post_type('g12_voice_session', array(
+            'labels' => array(
+                'name' => 'Voice Sessions',
+                'singular_name' => 'Voice Session',
+            ),
+            'public' => false,
+            'show_ui' => true,
+            'show_in_menu' => 'g12-rva',
+            'supports' => array('title', 'editor', 'custom-fields'),
+            'capability_type' => 'post',
+        ));
     }
 
     public function enqueue_assets() {
@@ -105,6 +119,8 @@ final class G12_Realtime_Voice_Assistant {
             'greeting' => sanitize_text_field($settings['greeting']),
             'hasKey' => $this->api_key() !== '',
             'homeUrl' => home_url('/'),
+            'storeSessions' => !empty($settings['store_sessions']),
+            'connectionMode' => $settings['connection_mode'] === 'server' ? 'server' : 'ephemeral',
         ));
     }
 
@@ -162,6 +178,12 @@ final class G12_Realtime_Voice_Assistant {
             'permission_callback' => '__return_true',
         ));
 
+        register_rest_route(self::REST_NAMESPACE, '/connect', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'connect_realtime'),
+            'permission_callback' => '__return_true',
+        ));
+
         register_rest_route(self::REST_NAMESPACE, '/search', array(
             'methods' => 'POST',
             'callback' => array($this, 'search_site'),
@@ -174,6 +196,12 @@ final class G12_Realtime_Voice_Assistant {
             'permission_callback' => '__return_true',
         ));
 
+        register_rest_route(self::REST_NAMESPACE, '/session-log', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'store_session_log'),
+            'permission_callback' => '__return_true',
+        ));
+
         register_rest_route(self::REST_NAMESPACE, '/admin/page-draft', array(
             'methods' => 'POST',
             'callback' => array($this, 'admin_page_draft'),
@@ -181,6 +209,81 @@ final class G12_Realtime_Voice_Assistant {
                 return current_user_can('edit_pages');
             },
         ));
+    }
+
+    public function connect_realtime(WP_REST_Request $request) {
+        if (!$this->rate_limit('connect', 20, MINUTE_IN_SECONDS)) {
+            return new WP_Error('g12_rva_rate_limited', 'Please wait before starting another voice session.', array('status' => 429));
+        }
+
+        $api_key = $this->api_key();
+        if ($api_key === '') {
+            return new WP_Error('g12_rva_missing_key', 'OpenAI API key is not configured.', array('status' => 500));
+        }
+
+        $sdp = (string) $request->get_param('sdp');
+        if ($sdp === '') {
+            $body = json_decode($request->get_body(), true);
+            if (is_array($body) && isset($body['sdp'])) {
+                $sdp = (string) $body['sdp'];
+            }
+        }
+        if ($sdp === '' || strpos($sdp, 'v=0') !== 0) {
+            return new WP_Error('g12_rva_bad_sdp', 'Invalid WebRTC offer.', array('status' => 400));
+        }
+
+        $settings = $this->settings();
+        $session = array(
+            'type' => 'realtime',
+            'model' => sanitize_text_field($settings['model']),
+            'instructions' => $this->instructions(),
+            'audio' => array(
+                'output' => array(
+                    'voice' => sanitize_text_field($settings['voice']),
+                ),
+            ),
+            'tools' => $this->tool_schema(),
+        );
+
+        $boundary = 'g12rva-' . wp_generate_password(24, false, false);
+        $body = $this->multipart_body($boundary, array(
+            'sdp' => $sdp,
+            'session' => wp_json_encode($session),
+        ));
+
+        $response = wp_remote_post('https://api.openai.com/v1/realtime/calls', array(
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $api_key,
+                'Content-Type' => 'multipart/form-data; boundary=' . $boundary,
+                'OpenAI-Safety-Identifier' => $this->safety_identifier(),
+            ),
+            'body' => $body,
+            'timeout' => 45,
+        ));
+
+        if (is_wp_error($response)) {
+            return new WP_Error('g12_rva_openai_request', $response->get_error_message(), array('status' => 500));
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $answer = (string) wp_remote_retrieve_body($response);
+        if ($code < 200 || $code >= 300 || strpos($answer, 'v=0') !== 0) {
+            return new WP_Error('g12_rva_openai_error', 'Could not create Realtime connection.', array('status' => 500));
+        }
+
+        return rest_ensure_response(array('sdp' => $answer));
+    }
+
+    private function multipart_body($boundary, $fields) {
+        $eol = "\r\n";
+        $body = '';
+        foreach ($fields as $name => $value) {
+            $body .= '--' . $boundary . $eol;
+            $body .= 'Content-Disposition: form-data; name="' . $name . '"' . $eol . $eol;
+            $body .= (string) $value . $eol;
+        }
+        $body .= '--' . $boundary . '--' . $eol;
+        return $body;
     }
 
     private function rate_limit($bucket, $limit, $window) {
@@ -446,6 +549,76 @@ final class G12_Realtime_Voice_Assistant {
         ));
     }
 
+    public function store_session_log(WP_REST_Request $request) {
+        $settings = $this->settings();
+        if (empty($settings['store_sessions'])) {
+            return rest_ensure_response(array('ok' => true, 'stored' => false));
+        }
+        if (!$this->rate_limit('session-log', 20, HOUR_IN_SECONDS)) {
+            return new WP_Error('g12_rva_rate_limited', 'Too many session logs. Please wait.', array('status' => 429));
+        }
+
+        $messages = $request->get_param('messages');
+        $lead = $request->get_param('lead');
+        $page = esc_url_raw((string) $request->get_param('page'));
+        if (!is_array($messages)) {
+            $messages = array();
+        }
+        if (!is_array($lead)) {
+            $lead = array();
+        }
+
+        $clean_messages = array();
+        foreach (array_slice($messages, -30) as $message) {
+            if (!is_array($message)) {
+                continue;
+            }
+            $role = sanitize_key($message['role'] ?? '');
+            $text = sanitize_textarea_field((string) ($message['text'] ?? ''));
+            if ($text === '' || ($role !== 'user' && $role !== 'assistant')) {
+                continue;
+            }
+            $clean_messages[] = ucfirst($role) . ': ' . $text;
+        }
+
+        $clean_lead = array();
+        foreach (array('name', 'phone', 'email', 'message', 'preferred_time') as $key) {
+            if (!empty($lead[$key])) {
+                $clean_lead[$key] = sanitize_text_field((string) $lead[$key]);
+            }
+        }
+
+        if (empty($clean_messages) && empty($clean_lead)) {
+            return rest_ensure_response(array('ok' => true, 'stored' => false));
+        }
+
+        $title_name = !empty($clean_lead['name']) ? $clean_lead['name'] : current_time('mysql');
+        $body = "Voice session\n\nPage: {$page}\n\n";
+        if (!empty($clean_lead)) {
+            $body .= "Collected details:\n";
+            foreach ($clean_lead as $key => $value) {
+                $body .= ucwords(str_replace('_', ' ', $key)) . ': ' . $value . "\n";
+            }
+            $body .= "\n";
+        }
+        if (!empty($clean_messages)) {
+            $body .= "Conversation:\n" . implode("\n", $clean_messages);
+        }
+
+        $post_id = wp_insert_post(array(
+            'post_type' => 'g12_voice_session',
+            'post_status' => 'private',
+            'post_title' => 'Voice session - ' . $title_name,
+            'post_content' => $body,
+        ), true);
+
+        return rest_ensure_response(array(
+            'ok' => true,
+            'stored' => !is_wp_error($post_id),
+            'sessionId' => is_wp_error($post_id) ? 0 : (int) $post_id,
+        ));
+    }
+
     private function lead_hash($name, $phone, $email, $message, $preferred_time, $page) {
         $parts = array(
             strtolower(trim((string) $name)),
@@ -501,6 +674,9 @@ final class G12_Realtime_Voice_Assistant {
         $out['lead_email'] = sanitize_email($input['lead_email'] ?? $defaults['lead_email']);
         $out['brand_label'] = sanitize_text_field($input['brand_label'] ?? $defaults['brand_label']);
         $out['greeting'] = sanitize_text_field($input['greeting'] ?? $defaults['greeting']);
+        $out['store_sessions'] = empty($input['store_sessions']) ? 0 : 1;
+        $connection_mode = sanitize_key($input['connection_mode'] ?? $defaults['connection_mode']);
+        $out['connection_mode'] = $connection_mode === 'server' ? 'server' : 'ephemeral';
         $new_key = trim((string) ($input['api_key'] ?? ''));
         $out['api_key'] = $new_key !== '' ? $new_key : ($old['api_key'] ?? '');
         return $out;
@@ -538,6 +714,19 @@ final class G12_Realtime_Voice_Assistant {
                     <tr>
                         <th scope="row">Greeting</th>
                         <td><textarea class="large-text" rows="3" name="<?php echo esc_attr(self::OPTION); ?>[greeting]"><?php echo esc_textarea($settings['greeting']); ?></textarea></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Store voice sessions</th>
+                        <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPTION); ?>[store_sessions]" value="1" <?php checked(!empty($settings['store_sessions'])); ?>> Save private session summaries in WordPress</label></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Connection mode</th>
+                        <td>
+                            <select name="<?php echo esc_attr(self::OPTION); ?>[connection_mode]">
+                                <option value="ephemeral" <?php selected($settings['connection_mode'], 'ephemeral'); ?>>Ephemeral token (verified stable)</option>
+                                <option value="server" <?php selected($settings['connection_mode'], 'server'); ?>>Server-side SDP first, fallback to ephemeral</option>
+                            </select>
+                        </td>
                     </tr>
                     <tr>
                         <th scope="row">Optional API key override</th>
