@@ -2,7 +2,7 @@
 /**
  * Plugin Name: G12 Realtime Voice Assistant
  * Description: Bottom-center OpenAI Realtime voice concierge for G12 business setup guidance, page help, form assistance, and lead capture.
- * Version: 0.4.3
+ * Version: 0.4.4
  * Author: G12
  */
 
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class G12_Realtime_Voice_Assistant {
     const OPTION = 'g12_rva_settings';
     const REST_NAMESPACE = 'g12-rva/v1';
-    const VERSION = '0.4.3';
+    const VERSION = '0.4.4';
 
     private static $instance = null;
 
@@ -139,7 +139,7 @@ final class G12_Realtime_Voice_Assistant {
         }
         ?>
         <div class="g12-rva" data-g12-rva>
-            <button class="g12-rva__orb" type="button" aria-label="Open G12 voice assistant" data-g12-rva-toggle>
+            <button class="g12-rva__orb" type="button" aria-label="Open G12 AI assistant" data-g12-rva-toggle>
                 <span class="g12-rva__rings" aria-hidden="true"></span>
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                     <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Z"></path>
@@ -147,16 +147,37 @@ final class G12_Realtime_Voice_Assistant {
                     <path d="M12 18v4"></path>
                     <path d="M8 22h8"></path>
                 </svg>
+                <span>Ask AI</span>
             </button>
             <section class="g12-rva__panel" aria-live="polite" hidden data-g12-rva-panel>
                 <div class="g12-rva__header">
                     <div>
-                        <strong><?php echo esc_html($settings['brand_label']); ?></strong>
+                        <strong>G12 agent</strong>
                         <span data-g12-rva-status>Ready</span>
                     </div>
-                    <button type="button" aria-label="Close voice assistant" data-g12-rva-close>&times;</button>
+                    <div class="g12-rva__header-actions">
+                        <button type="button" aria-label="New assistant chat" data-g12-rva-reset>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5H5v14h14v-7"></path><path d="M16 3h5v5"></path><path d="M21 3l-9 9"></path></svg>
+                        </button>
+                        <button type="button" aria-label="Close AI assistant" data-g12-rva-close>&times;</button>
+                    </div>
                 </div>
                 <div class="g12-rva__body">
+                    <div class="g12-rva__welcome">
+                        <h2>What can I help you with?</h2>
+                        <button type="button" data-g12-rva-suggest="I want to start a business in Dubai. What should I do first?">
+                            <span>?</span>
+                            <strong>Ask a question</strong>
+                        </button>
+                        <button type="button" data-g12-rva-suggest="Find the best page for Dubai business setup services.">
+                            <span></span>
+                            <strong>Find a page</strong>
+                        </button>
+                        <button type="button" data-g12-rva-suggest="Help me choose the right UAE business setup package and callback steps.">
+                            <span></span>
+                            <strong>Business setup help</strong>
+                        </button>
+                    </div>
                     <p data-g12-rva-message><?php echo esc_html($settings['greeting']); ?></p>
                     <div class="g12-rva__actions">
                         <button type="button" data-g12-rva-start>Start voice</button>
@@ -178,6 +199,12 @@ final class G12_Realtime_Voice_Assistant {
                         <input type="email" name="email" placeholder="Email" autocomplete="email" data-g12-rva-field="email" hidden>
                         <input type="text" name="preferred_time" placeholder="Preferred callback time" data-g12-rva-field="preferred_time" hidden>
                         <button type="submit">Next</button>
+                    </form>
+                    <form class="g12-rva__composer" data-g12-rva-composer>
+                        <input type="text" name="prompt" placeholder="Ask about G12 services or what you want to build" autocomplete="off">
+                        <button type="submit" aria-label="Send message">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 19V5"></path><path d="M5 12l7-7 7 7"></path></svg>
+                        </button>
                     </form>
                 </div>
             </section>

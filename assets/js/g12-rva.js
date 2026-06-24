@@ -6,6 +6,7 @@
   const panel = root.querySelector('[data-g12-rva-panel]');
   const toggle = root.querySelector('[data-g12-rva-toggle]');
   const closeBtn = root.querySelector('[data-g12-rva-close]');
+  const resetBtn = root.querySelector('[data-g12-rva-reset]');
   const startBtn = root.querySelector('[data-g12-rva-start]');
   const stopBtn = root.querySelector('[data-g12-rva-stop]');
   const statusEl = root.querySelector('[data-g12-rva-status]');
@@ -13,6 +14,8 @@
   const linksEl = root.querySelector('[data-g12-rva-links]');
   const historyEl = root.querySelector('[data-g12-rva-history]');
   const leadForm = root.querySelector('[data-g12-rva-lead]');
+  const composer = root.querySelector('[data-g12-rva-composer]');
+  const suggestions = root.querySelectorAll('[data-g12-rva-suggest]');
 
   let pc = null;
   let dc = null;
@@ -158,6 +161,19 @@
 
   function closePanel() {
     panel.hidden = true;
+  }
+
+  function resetSession() {
+    session = { messages: [], lead: {}, profile: {}, updatedAt: '' };
+    sessionLogged = false;
+    handledCalls.clear();
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch (e) {}
+    renderHistory();
+    hydrateLeadForm();
+    setMessage(config.greeting);
+    renderLinks([]);
   }
 
   async function startVoice() {
@@ -451,6 +467,24 @@
     return data;
   }
 
+  async function askTypedQuestion(text) {
+    const clean = String(text || '').trim();
+    if (!clean) return;
+    openPanel();
+    if (dc && dc.readyState === 'open') {
+      sendText(clean, true);
+      setMessage('I am checking that now.');
+      return;
+    }
+    remember('user', clean);
+    setMessage('Here are the closest G12 pages. Start voice if you want a live consultant-style answer.');
+    try {
+      await siteSearch(clean);
+    } catch (e) {
+      setMessage('Start voice and I can help with that directly.');
+    }
+  }
+
   function renderLinks(results) {
     if (!linksEl) return;
     linksEl.innerHTML = '';
@@ -655,8 +689,25 @@
     else closePanel();
   });
   closeBtn.addEventListener('click', closePanel);
+  if (resetBtn) resetBtn.addEventListener('click', resetSession);
   startBtn.addEventListener('click', startVoice);
   stopBtn.addEventListener('click', stopVoice);
+
+  suggestions.forEach((button) => {
+    button.addEventListener('click', () => {
+      askTypedQuestion(button.getAttribute('data-g12-rva-suggest') || button.textContent);
+    });
+  });
+
+  if (composer) {
+    composer.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = composer.elements.prompt;
+      const value = input ? input.value : '';
+      if (input) input.value = '';
+      askTypedQuestion(value);
+    });
+  }
 
   if (leadForm) {
     leadForm.addEventListener('submit', async (event) => {
