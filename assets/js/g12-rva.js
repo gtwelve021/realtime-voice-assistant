@@ -72,6 +72,13 @@
     saveSession();
   }
 
+  function leadFingerprint(values) {
+    const data = values || session.lead || {};
+    return ['name', 'phone', 'email', 'message', 'setup_location', 'visa_need', 'timeline', 'preferred_time']
+      .map((key) => String(data[key] || '').trim().toLowerCase())
+      .join('|');
+  }
+
   function renderHistory() {
     if (!historyEl) return;
     const last = session.messages.slice(-4);
@@ -426,12 +433,14 @@
       showLeadStep(missing);
       return { ok: false, missing: missing, message: 'Ask only for the next missing field: ' + fieldLabel(missing) + '.' };
     }
-    if (session.lead.already_sent) {
+    const payload = Object.assign({}, session.profile, session.lead, args, { page: window.location.href });
+    const fingerprint = leadFingerprint(payload);
+    if (session.lead.already_sent && session.lead.sent_fingerprint === fingerprint) {
       return { ok: true, alreadySent: true, message: 'This callback request was already sent in this browser session.' };
     }
-    const payload = Object.assign({}, session.profile, session.lead, args, { page: window.location.href });
     const data = await rest('/lead', payload);
     session.lead.already_sent = true;
+    session.lead.sent_fingerprint = fingerprint;
     saveSession();
     logSession();
     if (leadForm) {
