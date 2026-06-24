@@ -2,7 +2,7 @@
 /**
  * Plugin Name: G12 Realtime Voice Assistant
  * Description: Bottom-center OpenAI Realtime voice concierge for G12 business setup guidance, page help, form assistance, and lead capture.
- * Version: 0.4.1
+ * Version: 0.4.2
  * Author: G12
  */
 
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class G12_Realtime_Voice_Assistant {
     const OPTION = 'g12_rva_settings';
     const REST_NAMESPACE = 'g12-rva/v1';
-    const VERSION = '0.4.1';
+    const VERSION = '0.4.2';
 
     private static $instance = null;
 
@@ -360,7 +360,7 @@ final class G12_Realtime_Voice_Assistant {
             ? 'Detect the visitor language and reply in the same language when practical. If unsure, use simple English.'
             : 'Use simple English.';
 
-        return "You are the G12 voice concierge for a WordPress website about UAE and Dubai business setup. Sound like a warm human consultant: calm, simple, helpful, and not pushy. {$language_rule} Your goal is lead quality, not just long answers. Understand the visitor mind by listening for intent, urgency, confusion, business activity, visa need, and timeline. Use a smart 5-step qualification flow: 1) business activity, 2) preferred setup type or location such as mainland/free zone/offshore/unsure, 3) visa need, 4) timeline or urgency, 5) contact details. Ask exactly one question at a time and adapt based on what the visitor already said. Never ask for all form fields in one message. Use update_visitor_profile whenever you learn language, intent, urgency, service interest, setup location, visa need, or timeline. Use site_search when a page can help, open_page only for same-site pages in a new tab, fill_contact_form with details already collected, and request_callback only after you read back the exact name, phone or email, and business need, then the user confirms they are correct. If the user corrects submitted details, update the details and request_callback again with the corrected values. If request_callback returns duplicate=true or alreadySent=true, do not call it again; tell the user the request is already saved. Never claim legal certainty. Do not edit WordPress pages for public users. For page changes, say an admin must approve changes.";
+        return "You are the G12 voice concierge for a WordPress website about UAE and Dubai business setup. Sound like a warm human consultant: calm, simple, helpful, and not pushy. {$language_rule} Your goal is lead quality, not just long answers. Understand the visitor mind by listening for intent, urgency, confusion, business activity, visa need, and timeline. Use a smart 5-step qualification flow: 1) business activity, 2) preferred setup type or location such as mainland/free zone/offshore/unsure, 3) visa need, 4) timeline or urgency, 5) contact details. Ask exactly one question at a time and adapt based on what the visitor already said. Never ask for all form fields in one message. For names and phone numbers, be strict: ask the visitor to spell the name if unclear, ask for phone digits one by one if needed, and prefer the visible form for final contact details. Use update_visitor_profile whenever you learn language, intent, urgency, service interest, setup location, visa need, or timeline. Use site_search when a page can help, open_page only for same-site pages in a new tab, fill_contact_form with details already collected, and request_callback only after you read back the exact name, phone or email, and business need, then the user confirms they are correct. When calling request_callback after confirmation, include confirmed_details=true. If request_callback says needsConfirmation=true, read back the exact details and ask for confirmation before calling again. If the user corrects submitted details, update the details and request_callback again with the corrected values. If request_callback returns duplicate=true or alreadySent=true, do not call it again; tell the user the request is already saved. Never claim legal certainty. Do not edit WordPress pages for public users. For page changes, say an admin must approve changes.";
     }
 
     private function tool_schema() {
@@ -448,6 +448,7 @@ final class G12_Realtime_Voice_Assistant {
                         'setup_location' => array('type' => 'string'),
                         'visa_need' => array('type' => 'string'),
                         'timeline' => array('type' => 'string'),
+                        'confirmed_details' => array('type' => 'boolean', 'description' => 'True only after the visitor confirms the read-back name, phone or email, and business need are correct.'),
                     ),
                     'required' => array('message'),
                 ),
@@ -522,7 +523,8 @@ final class G12_Realtime_Voice_Assistant {
 
         $name = sanitize_text_field((string) $request->get_param('name'));
         $phone = sanitize_text_field((string) $request->get_param('phone'));
-        $email = sanitize_email((string) $request->get_param('email'));
+        $raw_email = trim((string) $request->get_param('email'));
+        $email = sanitize_email($raw_email);
         $message = sanitize_textarea_field((string) $request->get_param('message'));
         $preferred_time = sanitize_text_field((string) $request->get_param('preferred_time'));
         $language = sanitize_text_field((string) $request->get_param('language'));
@@ -533,9 +535,23 @@ final class G12_Realtime_Voice_Assistant {
         $visa_need = sanitize_text_field((string) $request->get_param('visa_need'));
         $timeline = sanitize_text_field((string) $request->get_param('timeline'));
         $page = esc_url_raw((string) $request->get_param('page'));
+        $confirmed_details = rest_sanitize_boolean($request->get_param('confirmed_details'));
+
+        if (!$confirmed_details) {
+            return new WP_Error('g12_rva_unconfirmed_details', 'Please confirm the exact name, contact, and business need before sending.', array('status' => 400));
+        }
 
         if ($phone === '' && $email === '') {
             return new WP_Error('g12_rva_missing_contact', 'Please provide phone or email.', array('status' => 400));
+        }
+        if ($phone !== '') {
+            $digits = preg_replace('/\D+/', '', $phone);
+            if (strlen($digits) < 7 || strlen($digits) > 15) {
+                return new WP_Error('g12_rva_invalid_phone', 'Please provide a valid phone number.', array('status' => 400));
+            }
+        }
+        if ($raw_email !== '' && $email === '') {
+            return new WP_Error('g12_rva_invalid_email', 'Please provide a valid email address.', array('status' => 400));
         }
 
         $lead_hash = $this->lead_hash($name, $phone, $email, $message, $preferred_time, $page);

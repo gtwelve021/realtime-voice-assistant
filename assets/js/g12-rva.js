@@ -58,10 +58,14 @@
 
   function rememberLead(values) {
     values = values || {};
+    const before = leadFingerprint();
     leadFields.forEach((key) => {
       if (values[key]) session.lead[key] = String(values[key]).trim();
     });
     rememberProfile(values);
+    if (before !== leadFingerprint()) {
+      session.lead.details_confirmed = '';
+    }
   }
 
   function rememberProfile(values) {
@@ -77,6 +81,20 @@
     return ['name', 'phone', 'email', 'message', 'setup_location', 'visa_need', 'timeline', 'preferred_time']
       .map((key) => String(data[key] || '').trim().toLowerCase())
       .join('|');
+  }
+
+  function phoneDigits(value) {
+    return String(value || '').replace(/\D+/g, '');
+  }
+
+  function isValidPhone(value) {
+    const digits = phoneDigits(value);
+    return digits.length >= 7 && digits.length <= 15;
+  }
+
+  function isValidEmail(value) {
+    const text = String(value || '').trim();
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text);
   }
 
   function renderHistory() {
@@ -434,6 +452,20 @@
       return { ok: false, missing: missing, message: 'Ask only for the next missing field: ' + fieldLabel(missing) + '.' };
     }
     const payload = Object.assign({}, session.profile, session.lead, args, { page: window.location.href });
+    const confirmed = args && (args.confirmed_details === true || args.confirmed_details === 'yes' || args.confirmed_details === 'true');
+    if (!confirmed && session.lead.details_confirmed !== 'yes') {
+      if (leadForm) {
+        leadForm.hidden = false;
+        hydrateLeadForm();
+        showLeadStep('confirm');
+      }
+      return {
+        ok: false,
+        needsConfirmation: true,
+        message: 'Read back the exact name, phone or email, and business need. Ask the user to confirm they are correct before calling request_callback again with confirmed_details=true.'
+      };
+    }
+    payload.confirmed_details = true;
     const fingerprint = leadFingerprint(payload);
     if (session.lead.already_sent && session.lead.sent_fingerprint === fingerprint) {
       return { ok: true, alreadySent: true, message: 'This callback request was already sent in this browser session.' };
@@ -463,6 +495,8 @@
   function nextMissingLeadField(requiredOnly) {
     const required = requiredOnly || leadFields;
     return required.find((key) => {
+      if (key === 'phone' && String(session.lead.phone || '').trim() && !isValidPhone(session.lead.phone)) return true;
+      if (key === 'email' && String(session.lead.email || '').trim() && !isValidEmail(session.lead.email)) return true;
       if (key === 'phone' && String(session.lead.email || '').trim()) return false;
       if (key === 'email' && String(session.lead.phone || '').trim()) return false;
       return !String(session.lead[key] || '').trim();
@@ -492,7 +526,7 @@
       if (field) field.hidden = key !== step;
     });
     if (step === 'confirm') {
-      if (stepEl) stepEl.textContent = 'Please confirm. Should I send this callback request to G12?';
+      if (stepEl) stepEl.textContent = 'Please confirm these details are correct: ' + confirmationSummary();
       if (submit) submit.textContent = 'Send request';
     } else {
       if (stepEl) stepEl.textContent = 'Please enter ' + fieldLabel(step) + '.';
@@ -500,6 +534,15 @@
       const current = leadForm.querySelector('[data-g12-rva-field="' + step + '"]');
       if (current && !leadForm.hidden) current.focus();
     }
+  }
+
+  function confirmationSummary() {
+    const parts = [];
+    if (session.lead.name) parts.push('Name: ' + session.lead.name);
+    if (session.lead.phone) parts.push('Phone: ' + session.lead.phone);
+    if (session.lead.email) parts.push('Email: ' + session.lead.email);
+    if (session.lead.message) parts.push('Need: ' + session.lead.message);
+    return (parts.join(' | ') || 'the callback details') + '.';
   }
 
   function buildSessionPrompt() {
@@ -538,7 +581,9 @@
         return;
       }
       try {
-        await requestCallback(Object.fromEntries(fd.entries()));
+        const values = Object.fromEntries(fd.entries());
+        session.lead.details_confirmed = 'yes';
+        await requestCallback(Object.assign(values, { confirmed_details: true }));
         setMessage('Thanks. Your request was sent to G12.');
       } catch (error) {
         setMessage(error.message || 'Could not send your request.');
