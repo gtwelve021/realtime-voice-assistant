@@ -2,7 +2,7 @@
 /**
  * Plugin Name: G12 Realtime Voice Assistant
  * Description: Bottom-center OpenAI Realtime voice concierge for G12 business setup guidance, page help, form assistance, and lead capture.
- * Version: 0.4.2
+ * Version: 0.4.3
  * Author: G12
  */
 
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class G12_Realtime_Voice_Assistant {
     const OPTION = 'g12_rva_settings';
     const REST_NAMESPACE = 'g12-rva/v1';
-    const VERSION = '0.4.2';
+    const VERSION = '0.4.3';
 
     private static $instance = null;
 
@@ -50,6 +50,7 @@ final class G12_Realtime_Voice_Assistant {
             'brand_label' => 'G12 Voice Guide',
             'greeting' => 'Hi, I am your G12 voice guide. Tell me what kind of business you want to start, and I will guide you one step at a time.',
             'store_sessions' => 1,
+            'store_audio' => 0,
             'connection_mode' => 'ephemeral',
             'lead_scoring' => 1,
             'multilingual' => 1,
@@ -124,6 +125,7 @@ final class G12_Realtime_Voice_Assistant {
             'hasKey' => $this->api_key() !== '',
             'homeUrl' => home_url('/'),
             'storeSessions' => !empty($settings['store_sessions']),
+            'storeAudio' => !empty($settings['store_audio']),
             'connectionMode' => $settings['connection_mode'] === 'server' ? 'server' : 'ephemeral',
             'multilingual' => !empty($settings['multilingual']),
             'qualificationDepth' => in_array($settings['qualification_depth'], array('short', 'smart', 'deep'), true) ? $settings['qualification_depth'] : 'smart',
@@ -160,6 +162,9 @@ final class G12_Realtime_Voice_Assistant {
                         <button type="button" data-g12-rva-start>Start voice</button>
                         <button type="button" data-g12-rva-stop disabled>Stop</button>
                     </div>
+                    <?php if (!empty($settings['store_audio'])) : ?>
+                        <p class="g12-rva__recording-note">Voice audio may be saved with this session for quality and follow-up.</p>
+                    <?php endif; ?>
                     <div class="g12-rva__links" hidden data-g12-rva-links></div>
                     <div class="g12-rva__history" hidden data-g12-rva-history></div>
                     <form class="g12-rva__lead" hidden data-g12-rva-lead>
@@ -208,6 +213,12 @@ final class G12_Realtime_Voice_Assistant {
         register_rest_route(self::REST_NAMESPACE, '/session-log', array(
             'methods' => 'POST',
             'callback' => array($this, 'store_session_log'),
+            'permission_callback' => '__return_true',
+        ));
+
+        register_rest_route(self::REST_NAMESPACE, '/audio-log', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'store_audio_log'),
             'permission_callback' => '__return_true',
         ));
 
@@ -873,6 +884,129 @@ final class G12_Realtime_Voice_Assistant {
         ));
     }
 
+    public function store_audio_log(WP_REST_Request $request) {
+        $settings = $this->settings();
+        if (empty($settings['store_audio'])) {
+            return rest_ensure_response(array('ok' => true, 'stored' => false, 'message' => 'Audio recording storage is disabled.'));
+        }
+        if (!$this->rate_limit('audio-log', 10, HOUR_IN_SECONDS)) {
+            return new WP_Error('g12_rva_rate_limited', 'Too many audio uploads. Please wait.', array('status' => 429));
+        }
+        if (empty($_FILES['audio']) || !is_array($_FILES['audio'])) {
+            return new WP_Error('g12_rva_missing_audio', 'Audio file is required.', array('status' => 400));
+        }
+
+        $file = $_FILES['audio'];
+        $size = isset($file['size']) ? (int) $file['size'] : 0;
+        if ($size <= 0) {
+            return new WP_Error('g12_rva_empty_audio', 'Audio file is empty.', array('status' => 400));
+        }
+        if ($size > 20 * 1024 * 1024) {
+            return new WP_Error('g12_rva_audio_too_large', 'Audio file is too large.', array('status' => 413));
+        }
+
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        require_once ABSPATH . 'wp-admin/includes/media.php';
+        require_once ABSPATH . 'wp-admin/includes/image.php';
+
+        $upload = wp_handle_upload($file, array(
+            'test_form' => false,
+            'mimes' => array(
+                'webm' => 'audio/webm',
+                'ogg' => 'audio/ogg',
+                'mp4' => 'audio/mp4',
+                'm4a' => 'audio/mp4',
+                'wav' => 'audio/wav',
+            ),
+        ));
+        if (!empty($upload['error'])) {
+            return new WP_Error('g12_rva_audio_upload_failed', $upload['error'], array('status' => 500));
+        }
+
+        $page = esc_url_raw((string) $request->get_param('page'));
+        $lead = json_decode((string) $request->get_param('lead'), true);
+        $profile = json_decode((string) $request->get_param('profile'), true);
+        $messages = json_decode((string) $request->get_param('messages'), true);
+        if (!is_array($lead)) {
+            $lead = array();
+        }
+        if (!is_array($profile)) {
+            $profile = array();
+        }
+        if (!is_array($messages)) {
+            $messages = array();
+        }
+
+        $attachment_id = wp_insert_attachment(array(
+            'post_mime_type' => $upload['type'],
+            'post_title' => 'G12 voice recording - ' . current_time('mysql'),
+            'post_content' => '',
+            'post_status' => 'private',
+        ), $upload['file']);
+        if (is_wp_error($attachment_id)) {
+            return new WP_Error('g12_rva_audio_attachment_failed', $attachment_id->get_error_message(), array('status' => 500));
+        }
+        wp_update_attachment_metadata($attachment_id, wp_generate_attachment_metadata($attachment_id, $upload['file']));
+
+        $clean_lead = array();
+        foreach (array('name', 'phone', 'email', 'message', 'setup_location', 'visa_need', 'timeline', 'preferred_time') as $key) {
+            if (!empty($lead[$key])) {
+                $clean_lead[$key] = sanitize_text_field((string) $lead[$key]);
+            }
+        }
+        foreach (array('language', 'intent', 'urgency', 'service_interest') as $key) {
+            if (!empty($profile[$key])) {
+                $clean_lead[$key] = sanitize_text_field((string) $profile[$key]);
+            }
+        }
+
+        $clean_messages = array();
+        foreach (array_slice($messages, -30) as $message) {
+            if (!is_array($message)) {
+                continue;
+            }
+            $role = sanitize_key($message['role'] ?? '');
+            $text = sanitize_textarea_field((string) ($message['text'] ?? ''));
+            if ($text !== '' && ($role === 'user' || $role === 'assistant')) {
+                $clean_messages[] = ucfirst($role) . ': ' . $text;
+            }
+        }
+
+        $title_name = !empty($clean_lead['name']) ? $clean_lead['name'] : current_time('mysql');
+        $body = "Voice recording\n\nPage: {$page}\nAttachment ID: {$attachment_id}\nAudio URL: " . wp_get_attachment_url($attachment_id) . "\n\n";
+        if (!empty($clean_lead)) {
+            $body .= "Collected details:\n";
+            foreach ($clean_lead as $key => $value) {
+                $body .= ucwords(str_replace('_', ' ', $key)) . ': ' . $value . "\n";
+            }
+            $body .= "\n";
+        }
+        if (!empty($clean_messages)) {
+            $body .= "Conversation:\n" . implode("\n", $clean_messages);
+        }
+
+        $session_id = wp_insert_post(array(
+            'post_type' => 'g12_voice_session',
+            'post_status' => 'private',
+            'post_title' => 'Voice recording - ' . $title_name,
+            'post_content' => $body,
+        ), true);
+        if (!is_wp_error($session_id) && $session_id) {
+            update_post_meta($session_id, '_g12_rva_audio_attachment_id', (int) $attachment_id);
+            wp_update_post(array(
+                'ID' => (int) $attachment_id,
+                'post_parent' => (int) $session_id,
+            ));
+        }
+
+        return rest_ensure_response(array(
+            'ok' => true,
+            'stored' => true,
+            'attachmentId' => (int) $attachment_id,
+            'sessionId' => is_wp_error($session_id) ? 0 : (int) $session_id,
+        ));
+    }
+
     private function lead_hash($name, $phone, $email, $message, $preferred_time, $page) {
         $parts = array(
             strtolower(trim((string) $name)),
@@ -930,6 +1064,7 @@ final class G12_Realtime_Voice_Assistant {
         $out['brand_label'] = sanitize_text_field($input['brand_label'] ?? $defaults['brand_label']);
         $out['greeting'] = sanitize_text_field($input['greeting'] ?? $defaults['greeting']);
         $out['store_sessions'] = empty($input['store_sessions']) ? 0 : 1;
+        $out['store_audio'] = empty($input['store_audio']) ? 0 : 1;
         $out['lead_scoring'] = empty($input['lead_scoring']) ? 0 : 1;
         $out['multilingual'] = empty($input['multilingual']) ? 0 : 1;
         $qualification_depth = sanitize_key($input['qualification_depth'] ?? $defaults['qualification_depth']);
@@ -981,6 +1116,10 @@ final class G12_Realtime_Voice_Assistant {
                     <tr>
                         <th scope="row">Store voice sessions</th>
                         <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPTION); ?>[store_sessions]" value="1" <?php checked(!empty($settings['store_sessions'])); ?>> Save private session summaries in WordPress</label></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Store audio recordings</th>
+                        <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPTION); ?>[store_audio]" value="1" <?php checked(!empty($settings['store_audio'])); ?>> Save visitor microphone audio as private WordPress media</label><p class="description">Shows a frontend notice. Audio uploads are limited to 20 MB and stored as private voice sessions.</p></td>
                     </tr>
                     <tr>
                         <th scope="row">Lead scoring</th>

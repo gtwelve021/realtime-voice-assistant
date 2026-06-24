@@ -18,6 +18,9 @@
   let dc = null;
   let stream = null;
   let audio = null;
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let recordingMime = '';
   let sessionLogged = false;
   const handledCalls = new Set();
   const storageKey = 'g12RvaSession:v2';
@@ -132,6 +135,20 @@
     });
   }
 
+  function restForm(path, formData) {
+    return fetch(config.restBase + path, {
+      method: 'POST',
+      headers: {
+        'X-WP-Nonce': config.nonce || ''
+      },
+      body: formData
+    }).then(async (res) => {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Request failed');
+      return data;
+    });
+  }
+
   function openPanel() {
     panel.hidden = false;
     setMessage(session.messages.length ? 'I remember this session. You can continue where you stopped.' : config.greeting);
@@ -177,6 +194,7 @@
       };
 
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      startAudioRecording(stream);
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
       const offer = await pc.createOffer();
@@ -225,6 +243,7 @@
   }
 
   async function stopVoice() {
+    await stopAudioRecording();
     await logSession();
     if (dc) {
       try { dc.close(); } catch (e) {}
@@ -247,6 +266,75 @@
     setStatus('Ready');
     startBtn.disabled = false;
     stopBtn.disabled = true;
+  }
+
+  function startAudioRecording(sourceStream) {
+    audioChunks = [];
+    recordingMime = '';
+    if (!config.storeAudio || !window.MediaRecorder || !sourceStream) return;
+    const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+    const mime = types.find((type) => {
+      try {
+        return MediaRecorder.isTypeSupported(type);
+      } catch (e) {
+        return false;
+      }
+    }) || '';
+    try {
+      mediaRecorder = new MediaRecorder(sourceStream, mime ? { mimeType: mime } : undefined);
+      recordingMime = mediaRecorder.mimeType || mime || 'audio/webm';
+      mediaRecorder.addEventListener('dataavailable', (event) => {
+        if (event.data && event.data.size > 0) audioChunks.push(event.data);
+      });
+      mediaRecorder.addEventListener('start', () => root.classList.add('is-recording'));
+      mediaRecorder.addEventListener('stop', () => root.classList.remove('is-recording'));
+      mediaRecorder.start(1000);
+    } catch (e) {
+      mediaRecorder = null;
+      audioChunks = [];
+    }
+  }
+
+  function stopAudioRecording() {
+    if (!mediaRecorder) return Promise.resolve();
+    return new Promise((resolve) => {
+      const recorder = mediaRecorder;
+      mediaRecorder = null;
+      const finish = async () => {
+        recorder.removeEventListener('stop', finish);
+        root.classList.remove('is-recording');
+        await uploadAudioRecording();
+        resolve();
+      };
+      recorder.addEventListener('stop', finish);
+      try {
+        if (recorder.state !== 'inactive') recorder.stop();
+        else finish();
+      } catch (e) {
+        resolve();
+      }
+    });
+  }
+
+  async function uploadAudioRecording() {
+    if (!config.storeAudio || !audioChunks.length) return;
+    const blob = new Blob(audioChunks, { type: recordingMime || 'audio/webm' });
+    audioChunks = [];
+    if (!blob.size) return;
+    const ext = (blob.type.indexOf('ogg') !== -1) ? 'ogg' : (blob.type.indexOf('mp4') !== -1 ? 'm4a' : 'webm');
+    const form = new FormData();
+    form.append('audio', blob, 'g12-voice-session-' + Date.now() + '.' + ext);
+    form.append('page', window.location.href);
+    form.append('messages', JSON.stringify(session.messages || []));
+    form.append('lead', JSON.stringify(session.lead || {}));
+    form.append('profile', JSON.stringify(session.profile || {}));
+    try {
+      const data = await restForm('/audio-log', form);
+      if (data && data.attachmentId) {
+        session.audioAttachmentId = data.attachmentId;
+        saveSession();
+      }
+    } catch (e) {}
   }
 
   async function logSession() {
@@ -553,6 +641,7 @@
       config.greeting,
       'Continue this browser session if context exists.',
       'Multilingual mode: ' + (config.multilingual ? 'on' : 'off') + '. Qualification depth: ' + (config.qualificationDepth || 'smart') + '.',
+      config.storeAudio ? 'The visitor has been shown a notice that microphone audio may be saved with this session.' : '',
       notes ? 'Recent voice chat:\n' + notes : '',
       profile ? 'Visitor profile:\n' + profile : '',
       lead ? 'Collected form details:\n' + lead : '',

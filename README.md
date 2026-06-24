@@ -15,6 +15,7 @@ WordPress plugin for a bottom-center OpenAI Realtime voice concierge on the G12 
 - Smart one-question-at-a-time qualification for business activity, setup type, visa need, timeline, and contact details.
 - Browser session memory for recent chat, visitor profile, and collected lead details.
 - Optional private WordPress voice session summaries for admin review.
+- Optional visitor microphone audio recording stored as private WordPress media/session records.
 - Server-side lead capture as private `g12_voice_lead` posts plus email notification.
 - Graceful fallback: if lead scoring fails, the lead is still saved as `unscored`.
 
