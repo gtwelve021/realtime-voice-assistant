@@ -21,7 +21,8 @@
   let sessionLogged = false;
   const handledCalls = new Set();
   const storageKey = 'g12RvaSession:v2';
-  const leadFields = ['name', 'phone', 'email', 'message', 'preferred_time'];
+  const profileFields = ['language', 'intent', 'urgency', 'service_interest', 'setup_location', 'visa_need', 'timeline'];
+  const leadFields = ['message', 'setup_location', 'visa_need', 'timeline', 'name', 'phone', 'email', 'preferred_time'];
   let session = loadSession();
 
   function loadSession() {
@@ -31,10 +32,11 @@
       return {
         messages: Array.isArray(parsed.messages) ? parsed.messages.slice(-20) : [],
         lead: parsed.lead && typeof parsed.lead === 'object' ? parsed.lead : {},
+        profile: parsed.profile && typeof parsed.profile === 'object' ? parsed.profile : {},
         updatedAt: parsed.updatedAt || ''
       };
     } catch (e) {
-      return { messages: [], lead: {}, updatedAt: '' };
+      return { messages: [], lead: {}, profile: {}, updatedAt: '' };
     }
   }
 
@@ -55,8 +57,17 @@
   }
 
   function rememberLead(values) {
+    values = values || {};
     leadFields.forEach((key) => {
       if (values[key]) session.lead[key] = String(values[key]).trim();
+    });
+    rememberProfile(values);
+  }
+
+  function rememberProfile(values) {
+    values = values || {};
+    profileFields.forEach((key) => {
+      if (values[key]) session.profile[key] = String(values[key]).trim();
     });
     saveSession();
   }
@@ -221,6 +232,7 @@
       await rest('/session-log', {
         messages: session.messages,
         lead: session.lead,
+        profile: session.profile,
         page: window.location.href
       });
     } catch (e) {}
@@ -295,6 +307,8 @@
         output = await siteSearch(args.query || '');
       } else if (name === 'open_page') {
         output = openPage(args.url || '');
+      } else if (name === 'update_visitor_profile') {
+        output = updateVisitorProfile(args);
       } else if (name === 'fill_contact_form') {
         output = fillContactForm(args);
       } else if (name === 'request_callback') {
@@ -353,9 +367,15 @@
       name: args.name || session.lead.name || '',
       phone: args.phone || session.lead.phone || '',
       email: args.email || session.lead.email || '',
-      message: args.message || session.lead.message || ''
+      message: args.message || session.lead.message || '',
+      setup_location: args.setup_location || session.lead.setup_location || session.profile.setup_location || '',
+      visa_need: args.visa_need || session.lead.visa_need || session.profile.visa_need || '',
+      timeline: args.timeline || session.lead.timeline || session.profile.timeline || ''
     };
     values.preferred_time = args.preferred_time || session.lead.preferred_time || '';
+    profileFields.forEach((key) => {
+      if (args[key]) values[key] = args[key];
+    });
     rememberLead(values);
 
     const selectors = {
@@ -389,6 +409,15 @@
     };
   }
 
+  function updateVisitorProfile(args) {
+    rememberProfile(args || {});
+    const profileText = profileFields
+      .filter((key) => session.profile[key])
+      .map((key) => key + ': ' + session.profile[key])
+      .join(', ');
+    return { ok: true, profile: session.profile, message: profileText ? 'Profile updated: ' + profileText : 'Profile updated.' };
+  }
+
   async function requestCallback(args) {
     rememberLead(args || {});
     const missing = nextMissingLeadField();
@@ -400,11 +429,11 @@
     if (session.lead.already_sent) {
       return { ok: true, alreadySent: true, message: 'This callback request was already sent in this browser session.' };
     }
-    const payload = Object.assign({}, session.lead, args, { page: window.location.href });
-      const data = await rest('/lead', payload);
-      session.lead.already_sent = true;
-      saveSession();
-      logSession();
+    const payload = Object.assign({}, session.profile, session.lead, args, { page: window.location.href });
+    const data = await rest('/lead', payload);
+    session.lead.already_sent = true;
+    saveSession();
+    logSession();
     if (leadForm) {
       leadForm.hidden = true;
       showLeadStep('confirm');
@@ -424,7 +453,11 @@
 
   function nextMissingLeadField(requiredOnly) {
     const required = requiredOnly || leadFields;
-    return required.find((key) => !String(session.lead[key] || '').trim()) || '';
+    return required.find((key) => {
+      if (key === 'phone' && String(session.lead.email || '').trim()) return false;
+      if (key === 'email' && String(session.lead.phone || '').trim()) return false;
+      return !String(session.lead[key] || '').trim();
+    }) || '';
   }
 
   function fieldLabel(key) {
@@ -433,6 +466,9 @@
       phone: 'your phone number',
       email: 'your email address',
       message: 'your business activity or question',
+      setup_location: 'your preferred setup location or type',
+      visa_need: 'whether you need visas',
+      timeline: 'your timeline',
       preferred_time: 'your preferred callback time'
     };
     return labels[key] || key;
@@ -460,11 +496,15 @@
   function buildSessionPrompt() {
     const notes = session.messages.slice(-8).map((item) => item.role + ': ' + item.text).join('\n');
     const lead = Object.keys(session.lead).filter((key) => session.lead[key]).map((key) => key + ': ' + session.lead[key]).join('\n');
+    const profile = Object.keys(session.profile || {}).filter((key) => session.profile[key]).map((key) => key + ': ' + session.profile[key]).join('\n');
     return [
       config.greeting,
       'Continue this browser session if context exists.',
+      'Multilingual mode: ' + (config.multilingual ? 'on' : 'off') + '. Qualification depth: ' + (config.qualificationDepth || 'smart') + '.',
       notes ? 'Recent voice chat:\n' + notes : '',
+      profile ? 'Visitor profile:\n' + profile : '',
       lead ? 'Collected form details:\n' + lead : '',
+      'Lead flow: ask one question at a time in this order when details are missing: business activity, setup location or type, visa need, timeline, then contact details.',
       'If collecting callback details, ask one question only. Do not ask multiple form questions together.'
     ].filter(Boolean).join('\n\n');
   }

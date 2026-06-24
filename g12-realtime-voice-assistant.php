@@ -2,7 +2,7 @@
 /**
  * Plugin Name: G12 Realtime Voice Assistant
  * Description: Bottom-center OpenAI Realtime voice concierge for G12 business setup guidance, page help, form assistance, and lead capture.
- * Version: 0.3.0
+ * Version: 0.4.0
  * Author: G12
  */
 
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 final class G12_Realtime_Voice_Assistant {
     const OPTION = 'g12_rva_settings';
     const REST_NAMESPACE = 'g12-rva/v1';
-    const VERSION = '0.3.0';
+    const VERSION = '0.4.0';
 
     private static $instance = null;
 
@@ -43,13 +43,17 @@ final class G12_Realtime_Voice_Assistant {
         return array(
             'enabled' => 1,
             'model' => 'gpt-realtime-2',
+            'scoring_model' => 'gpt-5.4-mini',
             'voice' => 'marin',
             'primary_form_id' => 1,
             'lead_email' => get_option('admin_email'),
             'brand_label' => 'G12 Voice Guide',
-            'greeting' => 'Hi, I am your G12 voice guide. I can help with Dubai business setup, find the right page, and collect callback details one question at a time.',
+            'greeting' => 'Hi, I am your G12 voice guide. Tell me what kind of business you want to start, and I will guide you one step at a time.',
             'store_sessions' => 1,
             'connection_mode' => 'ephemeral',
+            'lead_scoring' => 1,
+            'multilingual' => 1,
+            'qualification_depth' => 'smart',
         );
     }
 
@@ -121,6 +125,8 @@ final class G12_Realtime_Voice_Assistant {
             'homeUrl' => home_url('/'),
             'storeSessions' => !empty($settings['store_sessions']),
             'connectionMode' => $settings['connection_mode'] === 'server' ? 'server' : 'ephemeral',
+            'multilingual' => !empty($settings['multilingual']),
+            'qualificationDepth' => in_array($settings['qualification_depth'], array('short', 'smart', 'deep'), true) ? $settings['qualification_depth'] : 'smart',
         ));
     }
 
@@ -157,11 +163,14 @@ final class G12_Realtime_Voice_Assistant {
                     <div class="g12-rva__links" hidden data-g12-rva-links></div>
                     <div class="g12-rva__history" hidden data-g12-rva-history></div>
                     <form class="g12-rva__lead" hidden data-g12-rva-lead>
-                        <p class="g12-rva__lead-step" data-g12-rva-lead-step>First, what is your name?</p>
-                        <input type="text" name="name" placeholder="Name" autocomplete="name" data-g12-rva-field="name">
+                        <p class="g12-rva__lead-step" data-g12-rva-lead-step>First, what business activity do you want to start?</p>
+                        <textarea name="message" rows="3" placeholder="Business activity or question" data-g12-rva-field="message"></textarea>
+                        <input type="text" name="setup_location" placeholder="Mainland, free zone, offshore, or unsure" data-g12-rva-field="setup_location" hidden>
+                        <input type="text" name="visa_need" placeholder="Do you need visas?" data-g12-rva-field="visa_need" hidden>
+                        <input type="text" name="timeline" placeholder="When do you want to start?" data-g12-rva-field="timeline" hidden>
+                        <input type="text" name="name" placeholder="Name" autocomplete="name" data-g12-rva-field="name" hidden>
                         <input type="tel" name="phone" placeholder="Phone" autocomplete="tel" data-g12-rva-field="phone" hidden>
                         <input type="email" name="email" placeholder="Email" autocomplete="email" data-g12-rva-field="email" hidden>
-                        <textarea name="message" rows="3" placeholder="Business activity or question" data-g12-rva-field="message" hidden></textarea>
                         <input type="text" name="preferred_time" placeholder="Preferred callback time" data-g12-rva-field="preferred_time" hidden>
                         <button type="submit">Next</button>
                     </form>
@@ -346,11 +355,34 @@ final class G12_Realtime_Voice_Assistant {
     }
 
     private function instructions() {
-        return "You are the G12 voice concierge for a WordPress website about UAE and Dubai business setup. Speak briefly and naturally. Help users choose mainland, free zone, offshore, visa, tax, banking, and license options. If a user wants a callback or form help, ask exactly one question at a time in this order: name, phone number, email, business activity or message, preferred callback time, then confirmation. Never ask for all form fields in one message. Use any session context provided by the browser so the user does not need to repeat details after a page refresh. Use tools when helpful: site_search to find relevant website pages, open_page to open relevant same-site pages in a new tab, fill_contact_form to fill visible forms with details already collected, and request_callback only once after the user clearly confirms they want contact. If a request_callback tool returns duplicate=true or alreadySent=true, do not call it again; tell the user the request is already saved. Never claim legal certainty. Do not edit WordPress pages for public users. For page changes, say an admin must approve changes.";
+        $settings = $this->settings();
+        $language_rule = !empty($settings['multilingual'])
+            ? 'Detect the visitor language and reply in the same language when practical. If unsure, use simple English.'
+            : 'Use simple English.';
+
+        return "You are the G12 voice concierge for a WordPress website about UAE and Dubai business setup. Sound like a warm human consultant: calm, simple, helpful, and not pushy. {$language_rule} Your goal is lead quality, not just long answers. Understand the visitor mind by listening for intent, urgency, confusion, business activity, visa need, and timeline. Use a smart 5-step qualification flow: 1) business activity, 2) preferred setup type or location such as mainland/free zone/offshore/unsure, 3) visa need, 4) timeline or urgency, 5) contact details. Ask exactly one question at a time and adapt based on what the visitor already said. Never ask for all form fields in one message. Use update_visitor_profile whenever you learn language, intent, urgency, service interest, setup location, visa need, or timeline. Use site_search when a page can help, open_page only for same-site pages in a new tab, fill_contact_form with details already collected, and request_callback only once after clear confirmation. If request_callback returns duplicate=true or alreadySent=true, do not call it again; tell the user the request is already saved. Never claim legal certainty. Do not edit WordPress pages for public users. For page changes, say an admin must approve changes.";
     }
 
     private function tool_schema() {
         return array(
+            array(
+                'type' => 'function',
+                'name' => 'update_visitor_profile',
+                'description' => 'Update the remembered visitor profile when the assistant learns intent, language, urgency, service interest, setup location, visa need, or timeline. This does not submit a lead.',
+                'parameters' => array(
+                    'type' => 'object',
+                    'properties' => array(
+                        'language' => array('type' => 'string'),
+                        'intent' => array('type' => 'string'),
+                        'urgency' => array('type' => 'string'),
+                        'service_interest' => array('type' => 'string'),
+                        'setup_location' => array('type' => 'string'),
+                        'visa_need' => array('type' => 'string'),
+                        'timeline' => array('type' => 'string'),
+                        'confidence' => array('type' => 'string'),
+                    ),
+                ),
+            ),
             array(
                 'type' => 'function',
                 'name' => 'site_search',
@@ -387,6 +419,13 @@ final class G12_Realtime_Voice_Assistant {
                         'email' => array('type' => 'string'),
                         'message' => array('type' => 'string'),
                         'preferred_time' => array('type' => 'string'),
+                        'language' => array('type' => 'string'),
+                        'intent' => array('type' => 'string'),
+                        'urgency' => array('type' => 'string'),
+                        'service_interest' => array('type' => 'string'),
+                        'setup_location' => array('type' => 'string'),
+                        'visa_need' => array('type' => 'string'),
+                        'timeline' => array('type' => 'string'),
                     ),
                 ),
             ),
@@ -402,8 +441,15 @@ final class G12_Realtime_Voice_Assistant {
                         'email' => array('type' => 'string'),
                         'message' => array('type' => 'string'),
                         'preferred_time' => array('type' => 'string'),
+                        'language' => array('type' => 'string'),
+                        'intent' => array('type' => 'string'),
+                        'urgency' => array('type' => 'string'),
+                        'service_interest' => array('type' => 'string'),
+                        'setup_location' => array('type' => 'string'),
+                        'visa_need' => array('type' => 'string'),
+                        'timeline' => array('type' => 'string'),
                     ),
-                    'required' => array('name', 'phone', 'email', 'message'),
+                    'required' => array('message'),
                 ),
             ),
         );
@@ -479,6 +525,13 @@ final class G12_Realtime_Voice_Assistant {
         $email = sanitize_email((string) $request->get_param('email'));
         $message = sanitize_textarea_field((string) $request->get_param('message'));
         $preferred_time = sanitize_text_field((string) $request->get_param('preferred_time'));
+        $language = sanitize_text_field((string) $request->get_param('language'));
+        $intent = sanitize_text_field((string) $request->get_param('intent'));
+        $urgency = sanitize_text_field((string) $request->get_param('urgency'));
+        $service_interest = sanitize_text_field((string) $request->get_param('service_interest'));
+        $setup_location = sanitize_text_field((string) $request->get_param('setup_location'));
+        $visa_need = sanitize_text_field((string) $request->get_param('visa_need'));
+        $timeline = sanitize_text_field((string) $request->get_param('timeline'));
         $page = esc_url_raw((string) $request->get_param('page'));
 
         if ($phone === '' && $email === '') {
@@ -518,10 +571,23 @@ final class G12_Realtime_Voice_Assistant {
         }
 
         $title = $name !== '' ? $name : ($phone !== '' ? $phone : $email);
-        $body = "Voice assistant lead\n\nName: {$name}\nPhone: {$phone}\nEmail: {$email}\nMessage: {$message}\nPage: {$page}\n";
-        if ($preferred_time !== '') {
-            $body .= "Preferred time: {$preferred_time}\n";
-        }
+        $lead_data = array(
+            'name' => $name,
+            'phone' => $phone,
+            'email' => $email,
+            'message' => $message,
+            'preferred_time' => $preferred_time,
+            'language' => $language,
+            'intent' => $intent,
+            'urgency' => $urgency,
+            'service_interest' => $service_interest,
+            'setup_location' => $setup_location,
+            'visa_need' => $visa_need,
+            'timeline' => $timeline,
+            'page' => $page,
+        );
+        $score = $this->score_lead($lead_data);
+        $body = $this->lead_body($lead_data, $score);
         $post_id = wp_insert_post(array(
             'post_type' => 'g12_voice_lead',
             'post_status' => 'private',
@@ -531,6 +597,12 @@ final class G12_Realtime_Voice_Assistant {
 
         if (!is_wp_error($post_id) && $post_id) {
             update_post_meta($post_id, '_g12_rva_lead_hash', $lead_hash);
+            update_post_meta($post_id, '_g12_rva_lead_score', $score['lead_score']);
+            update_post_meta($post_id, '_g12_rva_urgency', $score['urgency'] ?: $urgency);
+            update_post_meta($post_id, '_g12_rva_intent', $score['intent'] ?: $intent);
+            update_post_meta($post_id, '_g12_rva_service_match', $score['service_match'] ?: $service_interest);
+            update_post_meta($post_id, '_g12_rva_recommended_action', $score['recommended_action']);
+            update_post_meta($post_id, '_g12_rva_language', $score['language'] ?: $language);
             set_transient($transient_key, (int) $post_id, 2 * HOUR_IN_SECONDS);
         }
 
@@ -549,6 +621,163 @@ final class G12_Realtime_Voice_Assistant {
         ));
     }
 
+    private function score_lead($lead_data) {
+        $fallback = array(
+            'lead_score' => 'unscored',
+            'language' => $lead_data['language'] ?? '',
+            'intent' => $lead_data['intent'] ?? '',
+            'urgency' => $lead_data['urgency'] ?? '',
+            'service_match' => $lead_data['service_interest'] ?? '',
+            'recommended_action' => 'Review the lead and follow up manually.',
+            'summary' => $this->fallback_summary($lead_data),
+            'scoring_error' => '',
+        );
+
+        $settings = $this->settings();
+        if (empty($settings['lead_scoring'])) {
+            $fallback['scoring_error'] = 'disabled';
+            return $fallback;
+        }
+
+        $api_key = $this->api_key();
+        if ($api_key === '') {
+            $fallback['scoring_error'] = 'missing_api_key';
+            return $fallback;
+        }
+
+        $prompt = "Score this UAE business setup website lead for G12. Return only compact JSON with keys: lead_score (hot|warm|cold|unscored), language, intent, urgency, service_match, recommended_action, summary. Summary must be one short sales-ready paragraph. Recommended action must be practical for sales team.";
+        $response = wp_remote_post('https://api.openai.com/v1/responses', array(
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $api_key,
+                'Content-Type' => 'application/json',
+                'OpenAI-Safety-Identifier' => $this->safety_identifier(),
+            ),
+            'body' => wp_json_encode(array(
+                'model' => sanitize_text_field($settings['scoring_model']),
+                'reasoning' => array('effort' => 'low'),
+                'text' => array('verbosity' => 'low'),
+                'max_output_tokens' => 500,
+                'input' => array(
+                    array('role' => 'system', 'content' => $prompt),
+                    array('role' => 'user', 'content' => wp_json_encode($lead_data)),
+                ),
+            )),
+            'timeout' => 30,
+        ));
+
+        if (is_wp_error($response)) {
+            $fallback['scoring_error'] = $response->get_error_message();
+            return $fallback;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $data = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code < 200 || $code >= 300 || !is_array($data)) {
+            $fallback['scoring_error'] = 'api_error';
+            return $fallback;
+        }
+
+        $text = $this->responses_text($data);
+        $parsed = $this->decode_json_text($text);
+        if (!is_array($parsed)) {
+            $fallback['scoring_error'] = 'parse_error';
+            return $fallback;
+        }
+
+        $score = array_merge($fallback, array(
+            'lead_score' => $this->allowed_value($parsed['lead_score'] ?? '', array('hot', 'warm', 'cold', 'unscored'), 'unscored'),
+            'language' => sanitize_text_field((string) ($parsed['language'] ?? $fallback['language'])),
+            'intent' => sanitize_text_field((string) ($parsed['intent'] ?? $fallback['intent'])),
+            'urgency' => sanitize_text_field((string) ($parsed['urgency'] ?? $fallback['urgency'])),
+            'service_match' => sanitize_text_field((string) ($parsed['service_match'] ?? $fallback['service_match'])),
+            'recommended_action' => sanitize_text_field((string) ($parsed['recommended_action'] ?? $fallback['recommended_action'])),
+            'summary' => sanitize_textarea_field((string) ($parsed['summary'] ?? $fallback['summary'])),
+            'scoring_error' => '',
+        ));
+
+        if ($score['summary'] === '') {
+            $score['summary'] = $fallback['summary'];
+        }
+        if ($score['recommended_action'] === '') {
+            $score['recommended_action'] = $fallback['recommended_action'];
+        }
+
+        return $score;
+    }
+
+    private function responses_text($data) {
+        if (!empty($data['output_text']) && is_string($data['output_text'])) {
+            return $data['output_text'];
+        }
+        if (empty($data['output']) || !is_array($data['output'])) {
+            return '';
+        }
+        $text = '';
+        foreach ($data['output'] as $item) {
+            if (empty($item['content']) || !is_array($item['content'])) {
+                continue;
+            }
+            foreach ($item['content'] as $content) {
+                if (isset($content['text']) && is_string($content['text'])) {
+                    $text .= $content['text'];
+                }
+            }
+        }
+        return $text;
+    }
+
+    private function decode_json_text($text) {
+        $text = trim((string) $text);
+        $text = preg_replace('/^```(?:json)?\s*/i', '', $text);
+        $text = preg_replace('/\s*```$/', '', $text);
+        return json_decode(trim($text), true);
+    }
+
+    private function allowed_value($value, $allowed, $default) {
+        $value = strtolower(sanitize_key((string) $value));
+        return in_array($value, $allowed, true) ? $value : $default;
+    }
+
+    private function fallback_summary($lead_data) {
+        $name = $lead_data['name'] ?: 'Visitor';
+        $need = $lead_data['message'] ?: $lead_data['intent'] ?: 'business setup help';
+        $timeline = $lead_data['timeline'] ?: 'timeline not specified';
+        return "{$name} requested {$need}. Timeline: {$timeline}. Follow up to qualify the setup package and next steps.";
+    }
+
+    private function lead_body($lead_data, $score) {
+        $body = "Lead score: {$score['lead_score']}\n";
+        $body .= "Summary: {$score['summary']}\n";
+        $body .= "Recommended action: {$score['recommended_action']}\n";
+        if (!empty($score['scoring_error'])) {
+            $body .= "Scoring status: unscored ({$score['scoring_error']})\n";
+        }
+        $body .= "\nCollected details\n\n";
+
+        $labels = array(
+            'name' => 'Name',
+            'phone' => 'Phone',
+            'email' => 'Email',
+            'message' => 'Business activity / question',
+            'preferred_time' => 'Preferred callback time',
+            'language' => 'Language',
+            'intent' => 'Intent',
+            'urgency' => 'Urgency',
+            'service_interest' => 'Service interest',
+            'setup_location' => 'Setup location',
+            'visa_need' => 'Visa need',
+            'timeline' => 'Timeline',
+            'page' => 'Page',
+        );
+        foreach ($labels as $key => $label) {
+            $value = isset($lead_data[$key]) ? trim((string) $lead_data[$key]) : '';
+            if ($value !== '') {
+                $body .= "{$label}: {$value}\n";
+            }
+        }
+        return $body;
+    }
+
     public function store_session_log(WP_REST_Request $request) {
         $settings = $this->settings();
         if (empty($settings['store_sessions'])) {
@@ -560,12 +789,16 @@ final class G12_Realtime_Voice_Assistant {
 
         $messages = $request->get_param('messages');
         $lead = $request->get_param('lead');
+        $profile = $request->get_param('profile');
         $page = esc_url_raw((string) $request->get_param('page'));
         if (!is_array($messages)) {
             $messages = array();
         }
         if (!is_array($lead)) {
             $lead = array();
+        }
+        if (!is_array($profile)) {
+            $profile = array();
         }
 
         $clean_messages = array();
@@ -582,7 +815,12 @@ final class G12_Realtime_Voice_Assistant {
         }
 
         $clean_lead = array();
-        foreach (array('name', 'phone', 'email', 'message', 'preferred_time') as $key) {
+        foreach (array('language', 'intent', 'urgency', 'service_interest', 'setup_location', 'visa_need', 'timeline') as $key) {
+            if (!empty($profile[$key])) {
+                $clean_lead[$key] = sanitize_text_field((string) $profile[$key]);
+            }
+        }
+        foreach (array('name', 'phone', 'email', 'message', 'setup_location', 'visa_need', 'timeline', 'preferred_time') as $key) {
             if (!empty($lead[$key])) {
                 $clean_lead[$key] = sanitize_text_field((string) $lead[$key]);
             }
@@ -669,12 +907,17 @@ final class G12_Realtime_Voice_Assistant {
         $out = array();
         $out['enabled'] = empty($input['enabled']) ? 0 : 1;
         $out['model'] = sanitize_text_field($input['model'] ?? $defaults['model']);
+        $out['scoring_model'] = sanitize_text_field($input['scoring_model'] ?? $defaults['scoring_model']);
         $out['voice'] = sanitize_text_field($input['voice'] ?? $defaults['voice']);
         $out['primary_form_id'] = absint($input['primary_form_id'] ?? $defaults['primary_form_id']);
         $out['lead_email'] = sanitize_email($input['lead_email'] ?? $defaults['lead_email']);
         $out['brand_label'] = sanitize_text_field($input['brand_label'] ?? $defaults['brand_label']);
         $out['greeting'] = sanitize_text_field($input['greeting'] ?? $defaults['greeting']);
         $out['store_sessions'] = empty($input['store_sessions']) ? 0 : 1;
+        $out['lead_scoring'] = empty($input['lead_scoring']) ? 0 : 1;
+        $out['multilingual'] = empty($input['multilingual']) ? 0 : 1;
+        $qualification_depth = sanitize_key($input['qualification_depth'] ?? $defaults['qualification_depth']);
+        $out['qualification_depth'] = in_array($qualification_depth, array('short', 'smart', 'deep'), true) ? $qualification_depth : 'smart';
         $connection_mode = sanitize_key($input['connection_mode'] ?? $defaults['connection_mode']);
         $out['connection_mode'] = $connection_mode === 'server' ? 'server' : 'ephemeral';
         $new_key = trim((string) ($input['api_key'] ?? ''));
@@ -700,6 +943,10 @@ final class G12_Realtime_Voice_Assistant {
                         <td><input class="regular-text" name="<?php echo esc_attr(self::OPTION); ?>[model]" value="<?php echo esc_attr($settings['model']); ?>"></td>
                     </tr>
                     <tr>
+                        <th scope="row">Lead scoring model</th>
+                        <td><input class="regular-text" name="<?php echo esc_attr(self::OPTION); ?>[scoring_model]" value="<?php echo esc_attr($settings['scoring_model']); ?>"></td>
+                    </tr>
+                    <tr>
                         <th scope="row">Voice</th>
                         <td><input class="regular-text" name="<?php echo esc_attr(self::OPTION); ?>[voice]" value="<?php echo esc_attr($settings['voice']); ?>"></td>
                     </tr>
@@ -718,6 +965,24 @@ final class G12_Realtime_Voice_Assistant {
                     <tr>
                         <th scope="row">Store voice sessions</th>
                         <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPTION); ?>[store_sessions]" value="1" <?php checked(!empty($settings['store_sessions'])); ?>> Save private session summaries in WordPress</label></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Lead scoring</th>
+                        <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPTION); ?>[lead_scoring]" value="1" <?php checked(!empty($settings['lead_scoring'])); ?>> Score leads and create a sales-ready summary</label></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Multilingual mode</th>
+                        <td><label><input type="checkbox" name="<?php echo esc_attr(self::OPTION); ?>[multilingual]" value="1" <?php checked(!empty($settings['multilingual'])); ?>> Reply in the visitor language when practical</label></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Qualification depth</th>
+                        <td>
+                            <select name="<?php echo esc_attr(self::OPTION); ?>[qualification_depth]">
+                                <option value="short" <?php selected($settings['qualification_depth'], 'short'); ?>>Short</option>
+                                <option value="smart" <?php selected($settings['qualification_depth'], 'smart'); ?>>Smart 5-step</option>
+                                <option value="deep" <?php selected($settings['qualification_depth'], 'deep'); ?>>Deep consultant</option>
+                            </select>
+                        </td>
                     </tr>
                     <tr>
                         <th scope="row">Connection mode</th>
